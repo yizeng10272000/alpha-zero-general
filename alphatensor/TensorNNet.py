@@ -1,94 +1,109 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-import os
 import numpy as np
 
 class TensorNNet(nn.Module):
-    def __init__(self, game, args):
+    def __init__(self, game, args=None):
         super(TensorNNet, self).__init__()
         self.board_x, self.board_y, self.board_z = game.getBoardSize()
         self.action_size = game.getActionSize()
-        self.args = args
 
-        self.fc1 = nn.Linear(self.board_x * self.board_y * self.board_z, 128)
-        self.fc2 = nn.Linear(128, 128)
+        self.conv = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.board_x * self.board_y * self.board_z, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU()
+        )
 
-        self.fc_pi = nn.Linear(128, self.action_size)
-        self.fc_v = nn.Linear(128, 1)
+        self.policy_head = nn.Linear(128, self.action_size)
+        self.value_head = nn.Sequential(
+            nn.Linear(128, 1),
+            nn.Tanh()
+        )
+
+        self.optimizer = optim.Adam(self.parameters(), lr=0.001)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.to(self.device)
 
     def forward(self, s):
-        s = s.view(-1, self.board_x * self.board_y * self.board_z)  # flatten
-        s = F.relu(self.fc1(s))
-        s = F.relu(self.fc2(s))
+        if not isinstance(s, torch.Tensor):
+            s = torch.tensor(s, dtype=torch.float32)
 
-        pi = self.fc_pi(s)
-        v = self.fc_v(s)
+        # Adjust the input shape to (batch_size, board_x*board_y*board_z)
+        if len(s.shape) == 3:  # For example (2,2,2)
+            s = s.view(-1, self.board_x * self.board_y * self.board_z)
+        elif len(s.shape) == 2 and s.shape[1] != self.board_x * self.board_y * self.board_z:
+            s = s.view(-1, self.board_x * self.board_y * self.board_z)
+        elif len(s.shape) == 1:
+            s = s.unsqueeze(0).view(-1, self.board_x * self.board_y * self.board_z)
 
-        return F.log_softmax(pi, dim=1), torch.tanh(v)
+        s = s.to(self.device)
+        x = self.conv(s)
+        pi = self.policy_head(x)
+        v = self.value_head(x)
+        return torch.softmax(pi, dim=1), v
 
-class NNetWrapper:
-    def __init__(self, game):
-        self.nnet = TensorNNet(game, args=None)
+    def train_step(self, examples):
+        self.train()
+        total_loss = 0
+        for board, target_pi, target_v in examples:
+            board = torch.tensor(board, dtype=torch.float32).to(self.device)
+            target_pi = torch.tensor(target_pi, dtype=torch.float32).to(self.device)
+            target_v = torch.tensor(target_v, dtype=torch.float32).to(self.device)
+
+            # Make sure the input shape is correct
+            if len(board.shape) == 3:
+                board = board.view(-1, self.board_x * self.board_y * self.board_z)
+
+            self.optimizer.zero_grad()
+            out_pi, out_v = self.forward(board)
+            loss_pi = -torch.sum(target_pi * torch.log(out_pi + 1e-8))
+            loss_v = nn.functional.mse_loss(out_v.view(-1), target_v)
+            loss = loss_pi + loss_v
+            loss.backward()
+            self.optimizer.step()
+            total_loss += loss.item()
+        return total_loss / len(examples)
+
+    def save_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
+        import os
+        filepath = os.path.join(folder, filename)
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        torch.save({
+            'state_dict': self.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+        }, filepath)
+
+    def load_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
+        import os
+        filepath = os.path.join(folder, filename)
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"No model found at {filepath}")
+        checkpoint = torch.load(filepath, map_location=self.device)
+        self.load_state_dict(checkpoint['state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+
+
+class NNetWrapper():
+    def __init__(self, game, args=None):
+        self.nnet = TensorNNet(game, args)
         self.board_x, self.board_y, self.board_z = game.getBoardSize()
         self.action_size = game.getActionSize()
 
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.nnet.to(self.device)
-
     def train(self, examples):
-        optimizer = optim.Adam(self.nnet.parameters(), lr=0.001)
-        batch_size = 64
-        epochs = 10
-
-        for epoch in range(epochs):
-            self.nnet.train()
-            batch_idx = 0
-            while batch_idx < len(examples):
-                sample_ids = np.random.randint(len(examples), size=batch_size)
-                boards, pis, vs = list(zip(*[examples[i] for i in sample_ids]))
-
-                boards = torch.FloatTensor(np.array(boards)).to(self.device)
-                target_pis = torch.FloatTensor(np.array(pis)).to(self.device)
-                target_vs = torch.FloatTensor(np.array(vs)).to(self.device)
-
-                out_pi, out_v = self.nnet(boards)
-
-                l_pi = self.loss_pi(target_pis, out_pi)
-                l_v = self.loss_v(target_vs, out_v)
-
-                total_loss = l_pi + l_v
-
-                optimizer.zero_grad()
-                total_loss.backward()
-                optimizer.step()
-
-                batch_idx += batch_size
+        return self.nnet.train_step(examples)
 
     def predict(self, board):
         self.nnet.eval()
-        board = torch.FloatTensor(board.astype(np.float64))
-        board = board.view(1, self.board_x, self.board_y, self.board_z).to(self.device)
         with torch.no_grad():
-            pi, v = self.nnet(board)
-        return torch.exp(pi).cpu().numpy()[0], v.cpu().numpy()[0]
-
-    def loss_pi(self, targets, outputs):
-        return -torch.sum(targets * outputs) / targets.size()[0]
-
-    def loss_v(self, targets, outputs):
-        return torch.sum((targets - outputs.view(-1)) ** 2) / targets.size()[0]
+            pi, v = self.nnet.forward(board)
+        return pi.cpu().numpy()[0], v.cpu().numpy()[0][0]
 
     def save_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
-        filepath = os.path.join(folder, filename)
-        if not os.path.exists(folder):
-            os.mkdir(folder)
-        torch.save({'state_dict': self.nnet.state_dict()}, filepath)
+        self.nnet.save_checkpoint(folder, filename)
 
     def load_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
-        filepath = os.path.join(folder, filename)
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"No model in path {filepath}")
-        checkpoint = torch.load(filepath, map_location=self.device)
-        self.nnet.load_state_dict(checkpoint['state_dict'])
+        self.nnet.load_checkpoint(folder, filename)

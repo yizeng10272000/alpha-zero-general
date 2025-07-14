@@ -8,9 +8,7 @@ class TensorGame():
         self.target_tensor = self.get_target_tensor()
         self.reset()
 
-        # -----------------------------
-        # Define a small candidate pool
-        # -----------------------------
+        # Discrete vector pooling for easy training and enumeration of action space
         self.vector_pool = [
             np.array([1, 0]),
             np.array([0, 1]),
@@ -18,7 +16,7 @@ class TensorGame():
             np.array([1, -1]),
         ]
 
-        # All possible (U,V,W) index combinations
+        # Index combinations of all (U, V, W) triplets, action space
         self.action_space = list(itertools.product(
             range(len(self.vector_pool)),
             range(len(self.vector_pool)),
@@ -26,7 +24,7 @@ class TensorGame():
         ))
 
     def get_target_tensor(self):
-        # Same as before: simple matrix multiplication tensor
+        # Example 2x2x2 matrix multiplication tensor
         T = np.zeros((2, 2, 2))
         T[0, 0, 0] = 1
         T[0, 1, 1] = 1
@@ -58,17 +56,17 @@ class TensorGame():
         return new_board, player
 
     def getValidMoves(self, board, player):
-        # For now all combinations are valid
+        # Currently all simplified actions are legal
         return np.ones(self.getActionSize(), dtype=np.int8)
 
     def getGameEnded(self, board, player):
         err = np.linalg.norm(board)
         if err < 1e-5:
-            return 1  # success
+            return 1  # Successful decomposition
         elif self.steps >= self.rank_limit:
-            return -1  # fail
+            return -1  # Exceeded rank limit, failed
         else:
-            return 0  # continue
+            return 0  # Game on
 
     def getCanonicalForm(self, board, player):
         return board
@@ -77,6 +75,7 @@ class TensorGame():
         return board.tobytes()
 
     def getSymmetries(self, board, pi):
+        # Tensor decomposition does not consider symmetry for the time being
         return [(board, pi)]
 
     def decode_action(self, action):
