@@ -1,115 +1,157 @@
 import logging
-import numpy as np
+import os
+import sys
 from collections import deque
+from pickle import Pickler, Unpickler
+from random import shuffle
+
+import numpy as np
+from tqdm import tqdm
+
+from Arena import Arena
+from MCTS import MCTS
 
 log = logging.getLogger(__name__)
 
-class Coach:
+
+class Coach():
+    """
+    This class executes the self-play + learning. It uses the functions defined
+    in Game and NeuralNet. args are specified in main.py.
+    """
+
     def __init__(self, game, nnet, args):
         self.game = game
         self.nnet = nnet
-        self.pnet = nnet.__class__(game)  # Old model, copy the nnet structure during initialization
-        self.pnet.load_state_dict(self.nnet.state_dict())  # Copy Weight
+        self.pnet = self.nnet.__class__(self.game)  # the competitor network
         self.args = args
-        self.trainExamplesHistory = []  # Training sample history
-        self.skipFirstSelfPlay = False
-        self.iteration = 0
-
-        # import MCTS
-        from MCTS import MCTS  
         self.mcts = MCTS(self.game, self.nnet, self.args)
-
-        self.updateThreshold = getattr(args, 'updateThreshold', 0.55)  # The new model acceptance threshold is 0.55 by default
-        self.checkpoint = getattr(args, 'checkpoint', './checkpoints')
-
-    def learn(self):
-        for i in range(1, self.args.numIters+1):
-            self.iteration = i
-            log.info(f"Starting Iter #{i} ...")
-
-            # 1. Generating training data through self-play
-            iterationTrainExamples = []
-            for _ in range(self.args.numEps):
-                iterationTrainExamples += self.executeEpisode()
-
-            self.trainExamplesHistory.append(iterationTrainExamples)
-
-            # Control the length of historical data
-            if len(self.trainExamplesHistory) > self.args.numItersForTrainExamplesHistory:
-                self.trainExamplesHistory.pop(0)
-
-            # 2. Training a new network
-            trainExamples = []
-            for e in self.trainExamplesHistory:
-                trainExamples.extend(e)
-            self.nnet.train(trainExamples)
-
-            # 3. The old model competes with the new model to decide whether to accept the new model
-            log.info("PITTING AGAINST PREVIOUS VERSION")
-            nwins, pwins, draws = self.pitModels()
-
-            log.info(f"NEW/PREV WINS : {nwins} / {pwins} ; DRAWS : {draws}")
-
-            win_ratio = float(nwins) / max(1, (nwins + pwins))
-            if win_ratio < self.updateThreshold:
-                log.info("REJECTING NEW MODEL")
-                # Loading old model weights
-                self.nnet.load_checkpoint(folder=self.checkpoint, filename=self.getCheckpointFile(i-1))
-            else:
-                log.info("ACCEPTING NEW MODEL")
-                self.nnet.save_checkpoint(folder=self.checkpoint, filename=self.getCheckpointFile(i))
-                self.pnet.load_state_dict(self.nnet.state_dict())
-
-        log.info("Training completed.")
+        self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
+        self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
 
     def executeEpisode(self):
+        """
+        This function executes one episode of self-play, starting with player 1.
+        As the game is played, each turn is added as a training example to
+        trainExamples. The game is played till the game ends. After the game
+        ends, the outcome of the game is used to assign values to each example
+        in trainExamples.
+
+        It uses a temp=1 if episodeStep < tempThreshold, and thereafter
+        uses temp=0.
+
+        Returns:
+            trainExamples: a list of examples of the form (canonicalBoard, currPlayer, pi,v)
+                           pi is the MCTS informed policy vector, v is +1 if
+                           the player eventually won the game, else -1.
+        """
         trainExamples = []
         board = self.game.getInitBoard()
-        player = 1
+        self.curPlayer = 1
         episodeStep = 0
 
         while True:
             episodeStep += 1
-            canonicalBoard = self.game.getCanonicalForm(board, player)
-            temp = 1 if episodeStep < self.args.tempThreshold else 0
+            canonicalBoard = self.game.getCanonicalForm(board, self.curPlayer)
+            temp = int(episodeStep < self.args.tempThreshold)
+
             pi = self.mcts.getActionProb(canonicalBoard, temp=temp)
-            symmetries = self.game.getSymmetries(canonicalBoard, pi)
-            for b, p in symmetries:
-                trainExamples.append([b, player, p, None])
+            sym = self.game.getSymmetries(canonicalBoard, pi)
+            for b, p in sym:
+                trainExamples.append([b, self.curPlayer, p, None])
 
             action = np.random.choice(len(pi), p=pi)
-            board, player = self.game.getNextState(board, player, action)
-            ended = self.game.getGameEnded(board, player)
-            if ended != 0:
-                return [(x[0], x[2], ended*((-1)**(x[1]!=player))) for x in trainExamples]
+            board, self.curPlayer = self.game.getNextState(board, self.curPlayer, action)
 
-    def pitModels(self):
-        # The old model and the new model played numGames games, with statistics of wins, losses and draws
-        numGames = self.args.arenaCompare
-        nwins, pwins, draws = 0, 0, 0
-        from Arena import Arena
+            r = self.game.getGameEnded(board, self.curPlayer)
 
-        # Wrap nnet and pnet into callable functions for Arena
-        def nnet_player(board):
-            pi, _ = self.nnet.getActionProb(board, temp=0)
-            return np.argmax(pi)
+            if r != 0:
+                return [(x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer))) for x in trainExamples]
 
-        def pnet_player(board):
-            pi, _ = self.pnet.getActionProb(board, temp=0)
-            return np.argmax(pi)
+    def learn(self):
+        """
+        Performs numIters iterations with numEps episodes of self-play in each
+        iteration. After every iteration, it retrains neural network with
+        examples in trainExamples (which has a maximum length of maxlenofQueue).
+        It then pits the new neural network against the old one and accepts it
+        only if it wins >= updateThreshold fraction of games.
+        """
 
-        arena = Arena(nnet_player, pnet_player, self.game)
+        for i in range(1, self.args.numIters + 1):
+            # bookkeeping
+            log.info(f'Starting Iter #{i} ...')
+            # examples of the iteration
+            if not self.skipFirstSelfPlay or i > 1:
+                iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
 
-        for _ in range(numGames):
-            result = arena.playGame()
-            if result == 1:
-                nwins += 1
-            elif result == -1:
-                pwins += 1
+                for _ in tqdm(range(self.args.numEps), desc="Self Play"):
+                    self.mcts = MCTS(self.game, self.nnet, self.args)  # reset search tree
+                    iterationTrainExamples += self.executeEpisode()
+
+                # save the iteration examples to the history 
+                self.trainExamplesHistory.append(iterationTrainExamples)
+
+            if len(self.trainExamplesHistory) > self.args.numItersForTrainExamplesHistory:
+                log.warning(
+                    f"Removing the oldest entry in trainExamples. len(trainExamplesHistory) = {len(self.trainExamplesHistory)}")
+                self.trainExamplesHistory.pop(0)
+            # backup history to a file
+            # NB! the examples were collected using the model from the previous iteration, so (i-1)  
+            self.saveTrainExamples(i - 1)
+
+            # shuffle examples before training
+            trainExamples = []
+            for e in self.trainExamplesHistory:
+                trainExamples.extend(e)
+            shuffle(trainExamples)
+
+            # training new network, keeping a copy of the old one
+            self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
+            self.pnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
+            pmcts = MCTS(self.game, self.pnet, self.args)
+
+            self.nnet.train(trainExamples)
+            nmcts = MCTS(self.game, self.nnet, self.args)
+
+            log.info('PITTING AGAINST PREVIOUS VERSION')
+            arena = Arena(lambda x: np.argmax(pmcts.getActionProb(x, temp=0)),
+                          lambda x: np.argmax(nmcts.getActionProb(x, temp=0)), self.game)
+            pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
+
+            log.info('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))
+            if pwins + nwins == 0 or float(nwins) / (pwins + nwins) < self.args.updateThreshold:
+                log.info('REJECTING NEW MODEL')
+                self.nnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
             else:
-                draws += 1
-
-        return nwins, pwins, draws
+                log.info('ACCEPTING NEW MODEL')
+                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
+                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
 
     def getCheckpointFile(self, iteration):
-        return f'checkpoint_{iteration}.pth.tar'
+        return 'checkpoint_' + str(iteration) + '.pth.tar'
+
+    def saveTrainExamples(self, iteration):
+        folder = self.args.checkpoint
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        filename = os.path.join(folder, self.getCheckpointFile(iteration) + ".examples")
+        with open(filename, "wb+") as f:
+            Pickler(f).dump(self.trainExamplesHistory)
+        f.closed
+
+    def loadTrainExamples(self):
+        modelFile = os.path.join(self.args.load_folder_file[0], self.args.load_folder_file[1])
+        examplesFile = modelFile + ".examples"
+        if not os.path.isfile(examplesFile):
+            log.warning(f'File "{examplesFile}" with trainExamples not found!')
+            r = input("Continue? [y|n]")
+            if r != "y":
+                sys.exit()
+        else:
+            log.info("File with trainExamples found. Loading it...")
+            with open(examplesFile, "rb") as f:
+                self.trainExamplesHistory = Unpickler(f).load()
+            log.info('Loading done!')
+
+            # examples based on the model were already collected (loaded)
+            self.skipFirstSelfPlay = True
