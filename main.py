@@ -3,8 +3,14 @@ import logging
 import coloredlogs
 
 from Coach import Coach
-from othello.OthelloGame import OthelloGame as Game
-from othello.pytorch.NNet import NNetWrapper as nn
+
+# previous code
+# from othello.OthelloGame import OthelloGame as Game
+# from othello.pytorch.NNet import NNetWrapper as nn
+
+from alphatensor.TensorGame import TensorGame as Game
+from alphatensor.TensorNNet import NNetWrapper as NNet
+
 from utils import *
 
 log = logging.getLogger(__name__)
@@ -31,10 +37,10 @@ args = dotdict({
 
 def main():
     log.info('Loading %s...', Game.__name__)
-    g = Game(6)
+    g = Game((2,2,2)) # tuple to present tensor format
 
-    log.info('Loading %s...', nn.__name__)
-    nnet = nn(g)
+    log.info('Loading %s...', NNet.__name__)  # Use NNet
+    nnet = NNet(g)                            # Use NNet
 
     if args.load_model:
         log.info('Loading checkpoint "%s/%s"...', args.load_folder_file[0], args.load_folder_file[1])
