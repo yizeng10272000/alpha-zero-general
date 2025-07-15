@@ -3,7 +3,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-class NNetWrapper():
+
+class NNetWrapper:
     def __init__(self, game):
         self.board_x, self.board_y, self.board_z = game.getBoardSize()
         self.action_size = game.getActionSize()
@@ -17,7 +18,7 @@ class NNetWrapper():
         optimizer = optim.Adam(self.nnet.parameters(), lr=self.lr)
         self.nnet.train()
 
-        for epoch in range(20):
+        for epoch in range(10):
             for board, pi, v in examples:
                 board = torch.tensor(board, dtype=torch.float32).unsqueeze(0).to(self.device)
                 target_pi = torch.tensor(pi, dtype=torch.float32).unsqueeze(0).to(self.device)
@@ -44,16 +45,15 @@ class NNetWrapper():
         filepath = os.path.join(folder, filename)
         if not os.path.exists(folder):
             os.makedirs(folder)
-        torch.save({
-            'state_dict': self.nnet.state_dict(),
-        }, filepath)
+        torch.save({'state_dict': self.nnet.state_dict()}, filepath)
 
     def load_checkpoint(self, folder='.', filename='checkpoint.pth.tar'):
         filepath = os.path.join(folder, filename)
         if not os.path.exists(filepath):
-            raise FileNotFoundError(f"No model in path {filepath}")
+            raise FileNotFoundError(f"No model found at {filepath}")
         checkpoint = torch.load(filepath, map_location=self.device)
         self.nnet.load_state_dict(checkpoint['state_dict'])
+
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
@@ -70,6 +70,7 @@ class ResidualBlock(nn.Module):
         out += residual
         return torch.relu(out)
 
+
 class TensorNNet(nn.Module):
     def __init__(self, x, y, z, action_size, num_channels=64, num_blocks=5):
         super(TensorNNet, self).__init__()
@@ -80,12 +81,12 @@ class TensorNNet(nn.Module):
             ResidualBlock(num_channels) for _ in range(num_blocks)
         ])
 
-        self.fc1 = nn.Linear(num_channels * x * y * z, 512)
-        self.fc_pi = nn.Linear(512, action_size)
-        self.fc_v = nn.Linear(512, 1)
+        self.fc1 = nn.Linear(num_channels * x * y * z, 256)
+        self.fc_pi = nn.Linear(256, action_size)
+        self.fc_v = nn.Linear(256, 1)
 
     def forward(self, s):
-        s = s.unsqueeze(1)  # [batch, 1, x, y, z]
+        s = s.unsqueeze(1) if len(s.shape) == 4 else s  # [batch, 1, x, y, z]
         s = torch.relu(self.bn1(self.conv1(s)))
         for block in self.resblocks:
             s = block(s)

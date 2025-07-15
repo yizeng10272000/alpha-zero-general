@@ -2,52 +2,51 @@ import logging
 import coloredlogs
 
 from Coach import Coach
-
 from alphatensor.TensorGame import TensorGame as Game
 from alphatensor.NNet import NNetWrapper as nn
-from utils import *
+from utils import dotdict
 
 log = logging.getLogger(__name__)
-coloredlogs.install(level='INFO')  # Change this to DEBUG to see more info.
+coloredlogs.install(level='INFO')  # DEBUG 可调更详细
 
 args = dotdict({
-    'numIters': 10,
-    'numEps': 10,              # Number of complete self-play games to simulate during a new iteration.
-    'tempThreshold': 15,        #
-    'updateThreshold': 0.4,     # During arena playoff, new neural net will be accepted if threshold or more of games are won.
-    'maxlenOfQueue': 200000,    # Number of game examples to train the neural networks.
-    'numMCTSSims': 200,          # Number of games moves for MCTS to simulate.
-    'arenaCompare': 10,         # Number of games to play during arena play to determine if new net will be accepted.
+    'numIters': 5,
+    'numEps': 10,
+    'tempThreshold': 10,
+    'updateThreshold': 0.55,
+    'maxlenOfQueue': 10000,
+    'numMCTSSims': 25,
+    'arenaCompare': 5,
     'cpuct': 1,
 
     'checkpoint': './temp/',
     'load_model': False,
-    'load_folder_file': ('/dev/models/8x100x50','best.pth.tar'),
-    'numItersForTrainExamplesHistory': 20,
+    'load_folder_file': ('temp','checkpoint.pth.tar'),
+    'numItersForTrainExamplesHistory': 5,
 })
 
 
 def main():
-    log.info('Loading %s...', Game.__name__)
+    log.info('Loading game...')
     g = Game()
 
-    log.info('Loading %s...', nn.__name__)
+    log.info('Loading NNet...')
     nnet = nn(g)
 
     if args.load_model:
-        log.info('Loading checkpoint "%s/%s"...', args.load_folder_file[0], args.load_folder_file[1])
+        log.info('Loading checkpoint...')
         nnet.load_checkpoint(args.load_folder_file[0], args.load_folder_file[1])
     else:
-        log.warning('Not loading a checkpoint!')
+        log.info('No checkpoint loaded!')
 
-    log.info('Loading the Coach...')
+    log.info('Loading Coach...')
     c = Coach(g, nnet, args)
 
     if args.load_model:
-        log.info("Loading 'trainExamples' from file...")
+        log.info("Loading train examples...")
         c.loadTrainExamples()
 
-    log.info('Starting the learning process 🎉')
+    log.info('Starting training...')
     c.learn()
 
 

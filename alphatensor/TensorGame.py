@@ -1,83 +1,114 @@
 import numpy as np
 
-class TensorGame():
-    def __init__(self, tensor_shape=(2, 2, 2)):
+
+class TensorGame:
+    def __init__(self, tensor_shape=(2, 2, 2), rank_budget=10, vector_bank_size=2):
         """
-        初始化目标张量，这里用最简单的 2x2x2 张量做示例
+        目标张量: 这里用 2x2x2 张量示例
+        rank_budget: 最多 rank-1 分解次数
+        vector_bank_size: 每个维度多少个候选向量
         """
-        self.tensor = self.init_tensor(tensor_shape)
-        self.remaining_tensor = self.tensor.copy()
+        self.tensor_shape = tensor_shape
+        self.rank_budget = rank_budget
+        self.vector_bank_size = vector_bank_size
+
+        self.target_tensor = self.init_tensor(tensor_shape)
+        self.reset()
+
+        self.action_size = self.vector_bank_size ** len(self.tensor_shape)
 
     def init_tensor(self, shape):
         """
-        返回初始张量
+        示例: 随机张量 or 可以换成矩阵乘法张量
         """
-        return np.ones(shape)
+        return np.random.rand(*shape)
+
+    def reset(self):
+        self.remaining_tensor = self.target_tensor.copy()
+        self.steps_taken = 0
 
     def getInitBoard(self):
-        """
-        初始状态
-        """
+        self.reset()
         return self.remaining_tensor
 
     def getBoardSize(self):
-        """
-        张量形状
-        """
-        return self.remaining_tensor.shape
+        return self.tensor_shape
 
     def getActionSize(self):
-        """
-        动作空间大小
-        这里用固定值：7 种候选 rank-1 张量（示例）
-        """
-        return 7
+        return self.action_size
 
-    def getNextState(self, board, player, action):
+    def decode_action(self, action):
         """
-        给定状态、玩家、动作，返回下一个状态（张量减去 rank-1）
-        注意：player 对 AlphaTensor 没意义，直接返回同一个 player
+        action: 单个整数索引，解码为 (u_idx, v_idx, w_idx)
         """
-        board = board.copy()
-        board -= self.getRank1Tensor(action)
-        board = np.clip(board, 0, None)
-        return board, player
+        idxs = []
+        a = action
+        for _ in range(len(self.tensor_shape)):
+            idxs.append(a % self.vector_bank_size)
+            a //= self.vector_bank_size
+        return tuple(reversed(idxs))
+
+    def get_vector_bank(self, dim_size):
+        """
+        向量库: 真实可训练时是连续向量，这里示例用单位向量组合
+        """
+        bank = []
+        for i in range(self.vector_bank_size):
+            vec = np.zeros(dim_size)
+            vec[i % dim_size] = 1.0
+            bank.append(vec)
+        return bank
 
     def getRank1Tensor(self, action):
         """
-        返回预定义的 rank-1 张量（示例）
+        生成外积: u ⊗ v ⊗ w
         """
-        return np.ones_like(self.remaining_tensor) * 0.1
+        idxs = self.decode_action(action)
+
+        # 分别对每个维度用自己的 basis
+        vecs = []
+        for dim_size, vec_idx in zip(self.tensor_shape, idxs):
+            bank = self.get_vector_bank(dim_size)
+            vecs.append(bank[vec_idx])
+
+        rank1 = np.einsum('i,j,k->ijk', vecs[0], vecs[1], vecs[2])
+        return rank1
+
+    def getNextState(self, board, player, action):
+        """
+        残差张量 - rank-1 外积
+        """
+        board = board.copy()
+        rank1 = self.getRank1Tensor(action)
+        board -= rank1
+
+        self.steps_taken += 1
+
+        return board, player
 
     def getValidMoves(self, board, player):
         """
-        有效动作：这里简单示例全部都有效
+        全部合法
         """
-        return np.ones(self.getActionSize(), dtype=np.uint8)
+        return np.ones(self.action_size, dtype=np.uint8)
 
     def getGameEnded(self, board, player):
         """
-        判断是否结束
+        Frobenius 范数足够小 or 用完 rank_budget
         """
-        if np.allclose(board, 0, atol=1e-2):
-            return 1  # 成功分解
+        norm = np.linalg.norm(board)
+        if norm < 1e-3:
+            return 1  # 成功
+        elif self.steps_taken >= self.rank_budget:
+            return 1  # 到 budget 强制结束
         else:
-            return 0  # 未结束
+            return 0
 
     def getCanonicalForm(self, board, player):
-        """
-        标准形式：对 AlphaTensor 没有视角翻转，直接返回
-        """
         return board
 
     def getSymmetries(self, board, pi):
-        """
-        用于棋盘对称性增强：对张量分解无对称性，直接返回原样
-        """
         return [(board, pi)]
 
     def stringRepresentation(self, board):
-        """
-        用字节表示状态
-        """
         return board.tobytes()
