@@ -2,13 +2,14 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
 
 class NNetWrapper:
     def __init__(self, game):
         self.board_x, self.board_y, self.board_z = game.getBoardSize()
         self.action_size = game.getActionSize()
-        self.lr = 0.001
+        self.lr = 0.01
 
         self.nnet = TensorNNet(self.board_x, self.board_y, self.board_z, self.action_size)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -18,21 +19,30 @@ class NNetWrapper:
         optimizer = optim.Adam(self.nnet.parameters(), lr=self.lr)
         self.nnet.train()
 
-        for epoch in range(10):
-            for board, pi, v in examples:
-                board = torch.tensor(board, dtype=torch.float32).unsqueeze(0).to(self.device)
-                target_pi = torch.tensor(pi, dtype=torch.float32).unsqueeze(0).to(self.device)
-                target_v = torch.tensor([v], dtype=torch.float32).to(self.device)
+        # 把examples分拆成numpy数组后，再转换为tensor，避免多次tensor转换慢的问题
+        boards = np.array([e[0] for e in examples], dtype=np.float32)
+        target_pis = np.array([e[1] for e in examples], dtype=np.float32)
+        target_vs = np.array([e[2] for e in examples], dtype=np.float32)
 
-                out_pi, out_v = self.nnet(board)
-                loss_pi = -torch.sum(target_pi * torch.log(out_pi + 1e-8))
-                loss_v = (target_v - out_v).pow(2).mean()
+        boards = torch.tensor(boards).to(self.device)
+        target_pis = torch.tensor(target_pis).to(self.device)
+        target_vs = torch.tensor(target_vs).to(self.device)
 
-                loss = loss_pi + loss_v
+        dataset = TensorDataset(boards, target_pis, target_vs)
+        loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
+        for epoch in range(50):
+            total_loss = 0
+            for batch_boards, batch_pis, batch_vs in loader:
                 optimizer.zero_grad()
+                out_pi, out_v = self.nnet(batch_boards)
+                loss_pi = -(batch_pis * torch.log(out_pi + 1e-8)).sum(dim=1).mean()
+                loss_v = ((batch_vs - out_v.squeeze()) ** 2).mean()
+                loss = loss_pi + loss_v
                 loss.backward()
                 optimizer.step()
+                total_loss += loss.item()
+            print(f"Epoch {epoch+1}, loss: {total_loss / len(loader):.4f}")
 
     def predict(self, board):
         board = torch.tensor(board, dtype=torch.float32).unsqueeze(0).to(self.device)
@@ -72,7 +82,7 @@ class ResidualBlock(nn.Module):
 
 
 class TensorNNet(nn.Module):
-    def __init__(self, x, y, z, action_size, num_channels=64, num_blocks=5):
+    def __init__(self, x, y, z, action_size, num_channels=128, num_blocks=8):
         super(TensorNNet, self).__init__()
         self.conv1 = nn.Conv3d(1, num_channels, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm3d(num_channels)

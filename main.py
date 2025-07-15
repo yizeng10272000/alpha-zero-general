@@ -10,20 +10,20 @@ log = logging.getLogger(__name__)
 coloredlogs.install(level='INFO')  # DEBUG 可调更详细
 
 args = dotdict({
-    'numIters': 5,
-    'numEps': 10,
-    'tempThreshold': 10,
-    'updateThreshold': 0.55,
-    'maxlenOfQueue': 10000,
-    'numMCTSSims': 25,
-    'arenaCompare': 5,
-    'cpuct': 1,
-
+    'numIters': 50,                   # 总训练轮数
+    'numEps': 50,                    # 每轮自对弈游戏数（生成训练样本）
+    'tempThreshold': 10,             # 控制探索温度阈值
+    'updateThreshold': 0.5,         # 新模型胜率超过该值才更新
+    'maxlenOfQueue': 10000,          # 训练样本队列最大长度
+    'numMCTSSims': 100,              # 每次MCTS模拟次数
+    'arenaCompare': 20,               # 旧模型对新模型的对局数
+    'cpuct': 0.5,                      # MCTS中探索参数
     'checkpoint': './temp/',
     'load_model': False,
     'load_folder_file': ('temp','checkpoint.pth.tar'),
     'numItersForTrainExamplesHistory': 5,
 })
+
 
 
 def main():
